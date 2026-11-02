@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TopicPick</title>
+<style>
+:root{--bg:#EDF2F7;--ink:#1F2A44;--sub:#4A5876;--card:#fff;--hl:#FFE45C;--hl-ink:#1F2A44;--ok:#BFEBD6;--err:#FFC9D4;--err-ink:#1F2A44;--focus:#2F6BFF}
+@media (prefers-color-scheme:dark){:root{--bg:#141B2D;--ink:#E8EDF7;--sub:#A5B1CC;--card:#1C2540;--hl:#E9C93A;--ok:#2E5E4B;--focus:#7FA6FF;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif;padding:0 16px}
+.wrap{max-width:860px;margin:0 auto}
+.nav{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 0;border-bottom:2px solid var(--ink)}
+.nav .brand{font-weight:800;font-size:18px}
+.nav nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.tab{font:inherit;font-weight:700;background:none;border:0;border-bottom:3px solid transparent;color:var(--ink);padding:4px 6px;cursor:pointer;border-radius:0}
+.tab[aria-current="page"]{border-bottom-color:var(--ink);background:var(--hl);color:var(--hl-ink)}
+main{padding:24px 0 56px}main.narrow{max-width:420px;margin:0 auto;padding-top:48px}
+h1{margin:0 0 16px;font-size:26px}h2{font-size:20px;margin:24px 0 12px}h3{margin:0 0 4px;font-size:18px}
+.card{background:var(--card);border:2px solid var(--ink);border-radius:6px;padding:16px;margin-bottom:16px;box-shadow:4px 4px 0 var(--ink)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+label,legend{display:block;font-weight:700;font-size:14px}
+input:not([type=radio]){display:block;width:100%;margin-top:4px;padding:8px;font:inherit;border:1.5px solid var(--ink);border-radius:4px;background:var(--card);color:var(--ink)}
+fieldset{border:0;margin:0;padding:0;min-width:0}fieldset label{display:inline-block;margin-right:12px;font-weight:400}
+button,.btn{font:inherit;font-weight:700;padding:8px 16px;border:2px solid var(--ink);border-radius:6px;background:var(--hl);color:var(--hl-ink);cursor:pointer;text-decoration:none;display:inline-block}
+button.alt,.btn.alt{background:var(--card);color:var(--ink)}
+button:disabled{opacity:.6;cursor:wait}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.err{background:var(--err);color:var(--err-ink);padding:8px 12px;border-radius:4px}
+.sub,.why{color:var(--sub);margin:4px 0}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+a{color:var(--ink)}ul,ol{padding-left:22px}li{margin:6px 0}.card p{margin:6px 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="nav"><span class="brand">TopicPick</span><nav id="nav" hidden></nav></header>
+<main id="app"><p class="sub">불러오는 중…</p></main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+(() => {
+const C = window.TOPICPICK, OK = /^[가-힣A-Za-z0-9 ·\-]{1,20}$/, UN = /^[A-Za-z0-9_]{4,20}$/;
+const LV = ['', '쉬움', '보통', '어려움'];
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sb = supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY);
+
+let session = null, view = 'login', mode = 'login', error = '', busy = false;
+let form = { subject:'', type:'', interest:'', level:'' }, list = [], favList = [], res = null;
+let lastAi = 0;
+
+const uname = () => session ? session.user.email.split('@')[0] : '';
+
+async function call(fn, body) {
+  const tok = session && session.access_token;
+  let r;
+  try {
+    r = await fetch('/api/' + fn, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: JSON.stringify(body) });
+  } catch (x) { const err = new Error('server'); err.code = 'server'; throw err; }
+  let data = {};
+  try { data = await r.json(); } catch (x) {}
+  if (!r.ok) { const err = new Error(data.error || 'server'); err.code = data.error || 'server'; throw err; }
+  return data;
+}
+
+// ---------- 화면 ----------
+function nav() {
+  const n = $('#nav');
+  if (!session) { n.hidden = true; return; }
+  n.hidden = false;
+  const cur = view === 'resource' ? 'recommend' : view;
+  n.innerHTML = `<button class="tab" data-go="recommend" ${cur==='recommend'?'aria-current="page"':''}>주제 추천</button>
+  <button class="tab" data-go="favorites" ${cur==='favorites'?'aria-current="page"':''}>저장 목록</button>
+  <button class="tab" id="logout">로그아웃 (${esc(uname())})</button>`;
+}
+
+function authView() {
+  const su = mode === 'signup';
+  $('#app').className = 'narrow';
+  $('#app').innerHTML = `<h1>TopicPick</h1>
+  <p class="sub">${su ? '아이디와 비밀번호로 계정을 만들어요.' : '로그인하고 수행평가 주제를 추천받아요.'}</p>
+  ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
+  <form class="card" id="auth">
+    <label>아이디<input id="username" name="username" required pattern="[A-Za-z0-9_]{4,20}" title="영문, 숫자, _ 로 4~20자" autocomplete="username"></label>
+    ${su ? '<p class="sub">영문, 숫자, _ 로 4~20자</p>' : '<br>'}
+    <label>비밀번호${su ? ' (8자 이상)' : ''}<input id="password" type="password" name="password" required minlength="8" autocomplete="${su ? 'new-password' : 'current-password'}"></label>
+    ${su ? '<br><label>비밀번호 확인<input id="password2" type="password" name="password2" required minlength="8" autocomplete="new-password"></label>' : ''}
+    <div class="btns"><button ${busy ? 'disabled' : ''}>${su ? '가입하기' : '로그인'}</button>
+    <button type="button" class="alt" id="switch">${su ? '로그인으로' : '회원가입'}</button></div>
+  </form>`;
+}
+
+function topicCard(t, showWhy) {
+  const on = t.saved;
+  return `<article class="card"><h3>${esc(t.title)}</h3>
+  <p class="sub">${esc(t.subject)} · ${esc(t.type)} · ${esc(t.interest)} · 난이도 ${LV[t.level]}</p>
+  <p>${esc(t.description)}</p>
+  ${showWhy ? `<p class="why">추천 이유: 입력한 과목(${esc(t.subject)}), 과제 유형(${esc(t.type)}), 관심 분야(${esc(t.interest)})에 맞춰 AI가 새로 만든 주제예요.</p>` : ''}
+  <div class="btns"><button type="button" data-res="${t.id}">자료 보기</button>
+  ${view === 'favorites' ? `<button type="button" class="alt" data-fav="${t.id}" data-on="1" data-remove="1">삭제</button>`
+    : `<button type="button" class="alt" data-fav="${t.id}" data-on="${on ? 1 : 0}">${on ? '★ 저장됨' : '☆ 저장'}</button>`}</div></article>`;
+}
+const radio = v => `<label><input type="radio" name="level" value="${v}" ${String(form.level)===String(v)?'checked':''} ${v===1?'required':''}>${LV[v]}</label>`;
+
+function recommendView() {
+  const pat = '[가-힣A-Za-z0-9 ·\\-]{1,20}';
+  $('#app').className = '';
+  $('#app').innerHTML = `<h1>주제 추천</h1>
+  <form class="card" id="f"><div class="grid">
+    <label>과목<input id="subject" name="subject" list="ls" placeholder="예: 과학" required maxlength="20" pattern="${pat}" title="한글, 영문, 숫자 20자 이내" value="${esc(form.subject)}"><datalist id="ls"><option value="국어"><option value="영어"><option value="수학"><option value="사회"><option value="과학"><option value="정보"></datalist></label>
+    <label>과제 유형<input id="type" name="type" list="lt" placeholder="예: 보고서" required maxlength="20" pattern="${pat}" title="한글, 영문, 숫자 20자 이내" value="${esc(form.type)}"><datalist id="lt"><option value="보고서"><option value="발표"><option value="탐구·실험"><option value="토론"></datalist></label>
+    <label>관심 분야<input id="interest" name="interest" placeholder="예: 우주, 축구, K-pop" required maxlength="20" pattern="${pat}" title="한글, 영문, 숫자 20자 이내" value="${esc(form.interest)}"></label>
+    <fieldset><legend>난이도</legend>${radio(1)}${radio(2)}${radio(3)}</fieldset></div>
+    <div class="btns"><button ${busy ? 'disabled' : ''}>${busy ? 'AI가 주제를 만드는 중…' : '추천 받기'}</button></div></form>
+  ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
+  ${list.length ? `<h2>추천 주제 ${list.length}개</h2>${list.map(t => topicCard(t, true)).join('')}
+  <div class="btns"><button type="button" class="alt" id="again" ${busy ? 'disabled' : ''}>다른 주제로 다시 뽑기</button></div>` : ''}`;
+}
+
+async function favoritesView() {
+  $('#app').className = '';
+  $('#app').innerHTML = '<h1>저장 목록</h1><p class="sub">불러오는 중…</p>';
+  const { data, error: e } = await sb.from('favorites').select('saved_at, topics(*)').order('saved_at', { ascending: false });
+  if (view !== 'favorites') return;
+  favList = (data || []).map(r => r.topics).filter(Boolean);
+  $('#app').innerHTML = `<h1>저장 목록</h1>
+  ${e ? '<p class="err" role="alert">저장 목록을 불러오지 못했어요.</p>' : ''}
+  ${!e && !favList.length ? '<p class="card">저장한 주제가 아직 없어요. <a href="#" data-go="recommend">주제 추천 받으러 가기</a></p>' : ''}
+  ${favList.map(t => topicCard(t, false)).join('')}`;
+}
+
+async function resourceView(id) {
+  $('#app').className = '';
+  $('#app').innerHTML = '<p class="sub">자료를 불러오는 중…</p>';
+  let d;
+  try { d = await call('resource', { id }); } catch (e) { if (e.code === 'login') return logoutUI(); view = 'recommend'; error = '자료를 불러오지 못했어요.'; return render(); }
+  if (view !== 'resource') return;
+  const t = d.topic, R = t.res || [];
+  const pick = (i, fb) => (R[i] && R[i].q) ? R[i] : { q: t.keyword, why: fb };
+  const n = pick(0, '관련 기사를 찾아 매체와 날짜를 출처로 적어요.'), c = pick(1, '개념과 배경 지식을 확인해요.'),
+        p = pick(2, '논문과 연구 자료를 찾아봐요.'), s = pick(3, '공식 통계 수치를 찾아봐요.');
+  const u = encodeURIComponent;
+  const links = [
+    ['네이버 뉴스', `https://search.naver.com/search.naver?where=news&query=${u(n.q)}`, n],
+    ['네이버 백과사전', `https://terms.naver.com/search.naver?query=${u(c.q)}`, c],
+    ['구글 학술검색', `https://scholar.google.com/scholar?hl=ko&q=${u(p.q)}`, p],
+    ['국가통계포털(KOSIS)', `https://kosis.kr/search/search.do?query=${u(s.q)}`, s]];
+  const steps = String(t.direction || '').split(/→|->/).map(x => x.trim()).filter(Boolean);
+  const a = (h, txt) => `<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${esc(txt)}</a>`;
+  const msg = (what) => d.noKey ? '네이버 API 키가 설정되지 않아 불러올 수 없어요. 아래 검색 링크를 이용해 보세요.'
+    : `${what}를 불러오지 못했거나 검색 결과가 없어요. 아래 검색 링크를 이용해 보세요.`;
+  $('#app').innerHTML = `<h1>${esc(t.title)}</h1>
+  <section class="card"><h2 style="margin-top:0">조사 방향</h2><ol>${steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol></section>
+  <section class="card"><h2 style="margin-top:0">관련 뉴스 기사</h2>
+  ${d.news && d.news.length ? `<ul>${d.news.map(x => `<li>${a(x.link, x.title)}<br>${esc(x.desc)}<br><span class="sub">${esc(x.host)} · ${esc(x.date)}</span></li>`).join('')}</ul>` : `<p class="sub">${msg('기사')}</p>`}
+  <p class="sub">네이버 뉴스 검색 결과예요. 기사의 저작권은 각 언론사에 있으니 과제에 쓸 때는 출처(매체·날짜)를 꼭 적어요.</p></section>
+  <section class="card"><h2 style="margin-top:0">참고 자료</h2>
+  ${d.refs && d.refs.length ? `<ul>${d.refs.map(x => `<li>${a(x.link, x.title)}<br><span class="sub">${esc(x.desc)}</span></li>`).join('')}</ul>` : `<p class="sub">${msg('관련 문서')}</p>`}
+  <p class="sub">네이버 백과사전 검색 결과예요. 과제에 쓸 때는 백과사전 이름과 찾아본 날짜를 출처로 적어요.</p></section>
+  <section class="card"><h2 style="margin-top:0">더 찾아보기</h2><p class="sub">출처마다 다른 검색어로 연결돼요. 링크는 외부 사이트로 이동해요.</p>
+  <ul>${links.map(l => `<li>${a(l[1], `${l[0]} · ‘${l[2].q}’`)}<br><span class="sub">${esc(l[2].why)}</span></li>`).join('')}</ul></section>
+  <button type="button" class="alt" data-go="recommend">추천 화면으로</button>`;
+}
+
+function render() {
+  nav();
+  if (!session) { view = 'login'; return authView(); }
+  if (view === 'login') view = 'recommend';
+  if (view === 'recommend') recommendView();
+  else if (view === 'favorites') favoritesView();
+}
+function go(v) { view = v; error = ''; render(); window.scrollTo(0, 0); }
+function logoutUI() { session = null; list = []; error = '세션이 끝났어요. 다시 로그인해 주세요.'; render(); }
+
+// ---------- 이벤트 ----------
+document.addEventListener('click', async e => {
+  const g = e.target.closest('[data-go]'); if (g) { e.preventDefault(); return go(g.dataset.go); }
+  const r = e.target.closest('[data-res]'); if (r) { view = 'resource'; nav(); window.scrollTo(0, 0); return resourceView(r.dataset.res); }
+  if (e.target.id === 'switch') { mode = mode === 'signup' ? 'login' : 'signup'; error = ''; return authView(); }
+  if (e.target.id === 'logout') { await sb.auth.signOut(); return; }
+  if (e.target.id === 'again') return $('#f').requestSubmit();
+  const f = e.target.closest('[data-fav]');
+  if (f) {
+    const id = Number(f.dataset.fav), on = f.dataset.on === '1';
+    const q = on ? sb.from('favorites').delete().eq('topic_id', id) : sb.from('favorites').insert({ topic_id: id });
+    const { error: er } = await q;
+    if (er) { f.textContent = '저장 실패 · 다시 시도'; return; }
+    if (f.dataset.remove) { f.closest('article').remove(); return; }
+    f.dataset.on = on ? '0' : '1'; f.textContent = on ? '☆ 저장' : '★ 저장됨';
+    const t = list.find(x => x.id === id); if (t) t.saved = !on;
+  }
+});
+
+document.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (busy) return;
+  const fd = new FormData(e.target);
+  if (e.target.id === 'auth') {
+    const u = String(fd.get('username') || '').trim(), pw = String(fd.get('password') || ''), su = mode === 'signup';
+    if (!UN.test(u)) error = '아이디는 영문, 숫자, _ 로 4~20자 입력해 주세요.';
+    else if (pw.length < 8) error = '비밀번호는 8자 이상이어야 해요.';
+    else if (su && pw !== fd.get('password2')) error = '비밀번호 확인이 일치하지 않아요.';
+    else error = '';
+    if (error) return authView();
+    busy = true; authView();
+    const cred = { email: `${u.toLowerCase()}@${C.AUTH_DOMAIN}`, password: pw };
+    const { data, error: er } = su ? await sb.auth.signUp(cred) : await sb.auth.signInWithPassword(cred);
+    busy = false;
+    if (er) {
+      const m = (er.message || '').toLowerCase();
+      error = su ? (m.includes('registered') || m.includes('already') ? '이미 사용 중인 아이디예요.' : m.includes('rate') ? '잠시 후 다시 시도해 주세요.' : '가입하지 못했어요. 잠시 후 다시 시도해 주세요.')
+                 : (m.includes('invalid') ? '아이디 또는 비밀번호가 맞지 않아요.' : '로그인하지 못했어요. 잠시 후 다시 시도해 주세요.');
+      return authView();
+    }
+    if (su && !data.session) { error = '가입은 됐지만 이메일 확인이 켜져 있어 로그인할 수 없어요. 관리자는 README의 Supabase 설정을 확인해 주세요.'; return authView(); }
+    return; // onAuthStateChange 가 화면을 바꿔 줘요
+  }
+  if (e.target.id === 'f') {
+    const cl = v => String(v ?? '').trim().replace(/\s+/g, ' ');
+    form = { subject: cl(fd.get('subject')), type: cl(fd.get('type')), interest: cl(fd.get('interest')), level: fd.get('level') || '' };
+    const lv = parseInt(form.level, 10);
+    if (![form.subject, form.type, form.interest].every(v => OK.test(v)) || !(lv >= 1 && lv <= 3)) { error = '과목, 과제 유형, 관심 분야는 한글·영문·숫자로 20자 이내로 입력하고, 난이도를 선택해 주세요.'; return render(); }
+    const wait = 8000 - (Date.now() - lastAi);
+    if (wait > 0) { error = '잠시 후 다시 눌러 주세요. 무료 사용량을 아끼려고 8초에 한 번만 받을 수 있어요.'; return render(); }
+    lastAi = Date.now(); busy = true; error = ''; render();
+    try { list = (await call('recommend', { ...form, level: lv })).topics; }
+    catch (er) {
+      list = [];
+      error = er.code === 'login' ? '세션이 끝났어요. 다시 로그인해 주세요.'
+        : er.code === 'rate' ? '잠시 후 다시 눌러 주세요. 무료 사용량을 아끼려고 8초에 한 번만 받을 수 있어요.'
+        : '추천을 만들지 못했어요. 입력을 바꾸거나 잠시 후 다시 시도해 주세요.';
+    }
+    busy = false; render();
+  }
+});
+
+sb.auth.onAuthStateChange((_ev, s) => {
+  const was = !!session; session = s;
+  if (!!s === was) return;   // 토큰 갱신 등으로 같은 로그인 상태가 다시 오면 화면을 건드리지 않아요
+  if (!s) error = error || '';
+  list = []; view = s ? 'recommend' : 'login'; mode = 'login'; if (s) error = '';
+  render();
+});
+sb.auth.getSession().then(({ data }) => { if (!session) { session = data.session; render(); } });
+})();
+</script>
+</body>
+</html>
